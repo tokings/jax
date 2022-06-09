@@ -23,6 +23,7 @@ from jax.experimental import maps
 from jax.experimental.pjit import pjit, FROM_GDA
 from jax.interpreters.pxla import PartitionSpec as P
 from jax.experimental.global_device_array import GlobalDeviceArray
+from jax._src import distributed
 import numpy as np
 
 
@@ -130,3 +131,41 @@ def assert_equal(in_tree, fail_message: str = ''):
       jax.tree_map(lambda *x: np.all(np.equal(*x)), in_tree, expected)):
     raise AssertionError(
         f'{fail_message} Expected: {expected}; got: {in_tree}.')
+
+
+def reached_preemption_sync_point(step_id: int) -> bool:
+  """Determine whether all hosts have reached a preemption sync step.
+
+  When any hosts receive preemption signals, a safe sync step will be determined
+  using the fastest task's next possible sync step and be propagated to all
+  other hosts. It's then safe to start saving a checkpoint at the sync step.
+
+  Note that the Python training loop is often several steps ahead of the device
+  due to asynchronous execution. As a result, the hosts will reach a sync point
+  several steps later than when the preemption signal is received.
+
+  To use this API, all hosts should start training from the same step and call
+  at every training step. Example usage:
+
+  ```
+  def should_save(step_id: int) -> bool:
+
+    # Should save an on-demand checkpoint for preemption
+    if multihost_utils.reached_preemption_sync_point(step_id):
+      return True
+
+    # Should save a regular checkpoint
+    return step_id - last_saved_checkpoint_step >= save_interval_steps
+  ```
+
+  Returns:
+    A boolean indicating whether all hosts have reached a synchronization step
+    after some hosts are preempted.
+
+  Raises:
+    RuntimeError: if preemption sync manager has not been inititialized.
+  """
+  sync_manager = distributed.global_state.preemption_sync_manager
+  if sync_manager is None:
+    raise RuntimeError("Preemption sync manager has not been initialized.")
+  return sync_manager.reached_sync_point(step_id)
